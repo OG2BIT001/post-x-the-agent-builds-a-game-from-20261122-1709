@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Asteroid Dodge — built by an AI agent from one prompt</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0d0a12; height: 100%; overflow: hidden; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { background: #0d0a12; touch-action: none; display: block; }
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: 10px; text-align: center;
+    color: #8a7f96; font: 14px/1.4 system-ui, sans-serif; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="540" height="960"></canvas></div>
+<div id="hint">Move: mouse / touch / arrow keys &mdash; dodge the rocks, grab the stars</div>
+<script>
+"use strict";
+/* Asteroid Dodge — a tiny browser game built by an AI coding agent
+   from one prompt: "dodge the asteroids, grab the stars, keep score". */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+const state = {
+  mode: "title",      // title | playing | over
+  score: 0, best: 0, stars: 0, combo: 0,
+  time: 0, spawnT: 0, starT: 0, shake: 0, flash: 0,
+  ship: { x: W / 2, y: H - 140, vx: 0, tilt: 0 },
+  rocks: [], shots: [], parts: [], floats: []
+};
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+function reset() {
+  state.score = 0; state.stars = 0; state.combo = 0; state.time = 0;
+  state.spawnT = 0; state.starT = 1.2; state.shake = 0; state.flash = 0;
+  state.rocks = []; state.shots = []; state.parts = []; state.floats = [];
+  state.ship.x = W / 2; state.ship.vx = 0;
+}
+
+function spawnRock() {
+  const r = rand(16, 42);
+  state.rocks.push({
+    x: rand(r, W - r), y: -r - 10, r,
+    vy: rand(150, 240) + state.time * 6,
+    vx: rand(-40, 40), rot: rand(0, 6.28), vr: rand(-1.5, 1.5),
+    verts: Array.from({ length: 9 }, () => rand(0.75, 1.15))
+  });
+}
+
+function spawnStar() {
+  state.shots.push({ x: rand(30, W - 30), y: -20, r: 14, vy: rand(130, 180), rot: 0 });
+}
+
+function explode(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, 6.28), s = rand(60, 320);
+    state.parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rand(0.4, 0.9), color, r: rand(2, 5) });
+  }
+}
+
+function floatText(x, y, text, color) {
+  state.floats.push({ x, y, text, color, life: 1 });
+}
+
+function circleHit(a, b) {
+  const dx = a.x - b.x, dy = a.y - b.y, rr = a.r + b.r;
+  return dx * dx + dy * dy < rr * rr * 0.82;
+}
+
+function step(dt) {
+  const s = state;
+  s.time += dt;
+  const ship = s.ship;
+  ship.x = clamp(ship.x + ship.vx * dt, 34, W - 34);
+  ship.tilt += ((ship.vx / 600) - ship.tilt) * Math.min(1, dt * 10);
+
+  s.spawnT -= dt;
+  if (s.spawnT <= 0) { spawnRock(); s.spawnT = Math.max(0.22, 0.75 - s.time * 0.012); }
+  s.starT -= dt;
+  if (s.starT <= 0) { spawnStar(); s.starT = rand(1.4, 2.6); }
+
+  for (const r of s.rocks) {
+    r.y += r.vy * dt; r.x += r.vx * dt; r.rot += r.vr * dt;
+    if (r.x < r.r) { r.x = r.r; r.vx = Math.abs(r.vx); }
+    if (r.x > W - r.r) { r.x = W - r.r; r.vx = -Math.abs(r.vx); }
+  }
+  s.rocks = s.rocks.filter(r => r.y < H + 60);
+
+  for (const st of s.shots) { st.y += st.vy * dt; st.rot += dt * 3; }
+  s.shots = s.shots.filter(st => st.y < H + 40);
+
+  // star pickups
+  for (const st of s.shots) {
+    if (circleHit(ship, st)) {
+      st.y = H + 999;
+      s.stars++; s.combo++;
+      const pts = 25 * s.combo;
+      s.score += pts;
+      explode(st.x, st.y, "#ffd23f", 10);
+      floatText(st.x, st.y - 10, "+" + pts, "#ffd23f");
+    }
+  }
+  s.shots = s.shots.filter(st => st.y < H + 40);
+
+  // rock collisions
+  for (const r of s.rocks) {
+    if (circleHit(ship, r)) {
+      explode(ship.x, ship.y, "#ff4d6d", 26);
+      explode(r.x, r.y, "#b8a6c9", 14);
+      s.shake = 14; s.flash = 0.55;
+      s.mode = "over";
+      s.best = Math.max(s.best, s.score);
+      return;
+    }
+  }
+
+  s.score += dt * 10;
+  for (const p of s.parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 260 * dt; p.life -= dt; }
+  s.parts = s.parts.filter(p => p.life > 0);
+  for (const f of s.floats) { f.y -= 46 * dt; f.life -= dt * 0.9; }
+  s.floats = s.floats.filter(f => f.life > 0);
+  s.shake = Math.max(0, s.shake - dt * 30);
+  s.flash = Math.max(0, s.flash - dt * 1.6);
+}
+
+function drawStar(x, y, r, rot, color) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  ctx.fillStyle = color; ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rr = i % 2 === 0 ? r : r * 0.45;
+    const a = -Math.PI / 2 + i * Math.PI / 5;
+    ctx[i === 0 ? "moveTo" : "lineTo"](Math.cos(a) * rr, Math.sin(a) * rr);
+  }
+  ctx.closePath(); ctx.fill(); ctx.restore();
+}
+
+function drawRock(r) {
+  ctx.save(); ctx.translate(r.x, r.y); ctx.rotate(r.rot);
+  ctx.fillStyle = "#3d3347"; ctx.strokeStyle = "#8a7f96"; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i < 9; i++) {
+    const a = i / 9 * Math.PI * 2, rr = r.r * r.verts[i];
+    ctx[i === 0 ? "moveTo" : "lineTo"](Math.cos(a) * rr, Math.sin(a) * rr);
+  }
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,0.08)";
+  ctx.beginPath(); ctx.arc(-r.r * 0.3, -r.r * 0.3, r.r * 0.35, 0, 6.29); ctx.fill();
+  ctx.restore();
+}
+
+function drawShip() {
+  const s = state.ship;
+  ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.tilt * 0.5);
+  // engine glow
+  const g = ctx.createRadialGradient(0, 26, 2, 0, 26, 30);
+  g.addColorStop(0, "rgba(255, 77, 109, 0.9)");
+  g.addColorStop(1, "rgba(255, 77, 109, 0)");
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 26, 30, 0, 6.29); ctx.fill();
+  // hull
+  ctx.fillStyle = "#ff4d6d";
+  ctx.beginPath(); ctx.moveTo(0, -26); ctx.lineTo(20, 16); ctx.lineTo(8, 10); ctx.lineTo(-8, 10); ctx.lineTo(-20, 16); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#ffd23f";
+  ctx.beginPath(); ctx.arc(0, -6, 6, 0, 6.29); ctx.fill();
+  ctx.restore();
+}
+
+function drawBackground(t) {
+  ctx.fillStyle = "#0d0a12"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  for (let i = 0; i < 70; i++) {
+    const x = (i * 97.3) % W, y = ((i * 173.1) + t * (20 + (i % 5) * 14)) % H;
+    ctx.globalAlpha = 0.25 + (i % 3) * 0.2;
+    ctx.fillRect(x, y, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD() {
+  ctx.textAlign = "left"; ctx.textBaseline = "top";
+  ctx.fillStyle = "#ffffff"; ctx.font = "700 44px system-ui, sans-serif";
+  ctx.fillText("SCORE " + Math.floor(state.score), 24, 22);
+  ctx.fillStyle = "#ffd23f"; ctx.font = "700 30px system-ui, sans-serif";
+  ctx.fillText("★ " + state.stars + (state.combo > 1 ? "   COMBO ×" + state.combo : ""), 24, 78);
+  ctx.textAlign = "right"; ctx.fillStyle = "#8a7f96";
+  ctx.fillText("BEST " + Math.floor(state.best), W - 24, 26);
+}
+
+function draw() {
+  const s = state;
+  ctx.save();
+  if (s.shake > 0) ctx.translate(rand(-s.shake, s.shake) * 0.5, rand(-s.shake, s.shake) * 0.5);
+  drawBackground(s.time);
+  for (const st of s.shots) drawStar(st.x, st.y, st.r, st.rot, "#ffd23f");
+  for (const r of s.rocks) drawRock(r);
+  for (const p of s.parts) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.29); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  if (s.mode !== "over") drawShip();
+  for (const f of s.floats) {
+    ctx.globalAlpha = Math.max(0, f.life);
+    ctx.fillStyle = f.color; ctx.font = "700 28px system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  if (s.mode === "playing" || s.mode === "over") drawHUD();
+
+  if (s.mode === "title") {
+    ctx.fillStyle = "rgba(13,10,18,0.55)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ff4d6d"; ctx.font = "900 64px system-ui, sans-serif";
+    ctx.fillText("ASTEROID", W / 2, 300);
+    ctx.fillText("DODGE", W / 2, 372);
+    ctx.fillStyle = "#ffffff"; ctx.font = "400 30px system-ui, sans-serif";
+    ctx.fillText("dodge the rocks · grab the stars", W / 2, 470);
+    ctx.fillStyle = "#ffd23f"; ctx.font = "700 32px system-ui, sans-serif";
+    ctx.fillText("built by an AI agent", W / 2, 520);
+    ctx.fillText("from ONE prompt", W / 2, 560);
+    const pulse = 0.6 + 0.4 * Math.sin(s.time * 4);
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = "#ffffff"; ctx.font = "700 36px system-ui, sans-serif";
+    ctx.fillText("TAP TO PLAY", W / 2, 700);
+    ctx.globalAlpha = 1;
+  }
+
+  if (s.mode === "over") {
+    ctx.fillStyle = "rgba(13,10,18,0.6)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ff4d6d"; ctx.font = "900 72px system-ui, sans-serif";
+    ctx.fillText("GAME OVER", W / 2, 380);
+    ctx.fillStyle = "#ffffff"; ctx.font = "700 44px system-ui, sans-serif";
+    ctx.fillText("SCORE " + Math.floor(s.score), W / 2, 480);
+    ctx.fillStyle = "#ffd23f"; ctx.font = "400 32px system-ui, sans-serif";
+    ctx.fillText("★ " + s.stars + " stars grabbed", W / 2, 540);
+    const pulse = 0.6 + 0.4 * Math.sin(s.time * 4);
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = "#ffffff"; ctx.font = "700 36px system-ui, sans-serif";
+    ctx.fillText("TAP TO PLAY AGAIN", W / 2, 660);
+    ctx.globalAlpha = 1;
+  }
+
+  if (s.flash > 0) {
+    ctx.fillStyle = "rgba(255,77,109," + (s.flash * 0.5).toFixed(3) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.033, (now - last) / 1000);
+  last = now;
+  if (state.mode === "playing") step(dt);
+  else state.time += dt;
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function pointerX(e) {
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+  return x / rect.width * W;
+}
+
+canvas.addEventListener("pointerdown", e => {
+  if (state.mode === "title") { reset(); state.mode = "playing"; }
+  else if (state.mode === "over") { reset(); state.mode = "playing"; }
+  state.ship.x = pointerX(e);
+});
+canvas.addEventListener("pointermove", e => {
+  if (state.mode === "playing") {
+    const tx = pointerX(e);
+    state.ship.vx = clamp((tx - state.ship.x) * 12, -700, 700);
+  }
+});
+window.addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft") state.ship.vx = -520;
+  if (e.key === "ArrowRight") state.ship.vx = 520;
+  if (e.key === " " || e.key === "Enter") {
+    if (state.mode !== "playing") { reset(); state.mode = "playing"; }
+  }
+});
+window.addEventListener("keyup", e => {
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") state.ship.vx = 0;
+});
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
